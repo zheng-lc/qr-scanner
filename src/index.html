@@ -380,19 +380,37 @@
     /* ---------- 窗口尺寸管理 ---------- */
     const IDLE = 200, RESULT = 360;
     let curSize = IDLE;
-    let idlePos = null;          // 记住空闲态位置
     let suppressMoveSave = false; // 程序化移动时不保存位置
+    let shotOrig = null;          // 进入截图前的窗口位置/尺寸，退出时恢复
 
     async function resizeTo(size, pos) {
       try {
         const sf = await win.scaleFactor();
         if (pos) {
-          await win.setPosition(new PhysicalPosition(Math.round(pos.x * sf), Math.round(pos.y * sf)));
+          // pos 来自 outerPosition()，已是【物理像素】，不能再乘 scaleFactor
+          // （否则高 DPI 下会双重缩放，导致窗口跳位甚至飞出屏幕）
+          let px = Math.round(pos.x), py = Math.round(pos.y);
+          // 边界保护：确保窗口完整落在屏幕内
+          try {
+            const [sw, sh] = await invoke("screen_size");
+            const w = Math.round(size * sf);
+            px = Math.max(0, Math.min(px, sw - w));
+            py = Math.max(0, Math.min(py, sh - w));
+          } catch (e) {}
+          await win.setPosition(new PhysicalPosition(px, py));
         } else {
           const p = await win.outerPosition();
           const dx = Math.round((curSize - size) / 2 / sf);
           const dy = Math.round((curSize - size) / 2 / sf);
-          await win.setPosition(new PhysicalPosition(p.x + Math.round(dx * sf), p.y + Math.round(dy * sf)));
+          // 居中偏移后同样做边界保护，防止窗口被推出屏幕
+          let px = p.x + Math.round(dx * sf), py = p.y + Math.round(dy * sf);
+          try {
+            const [sw, sh] = await invoke("screen_size");
+            const w = Math.round(size * sf);
+            px = Math.max(0, Math.min(px, sw - w));
+            py = Math.max(0, Math.min(py, sh - w));
+          } catch (e) {}
+          await win.setPosition(new PhysicalPosition(px, py));
         }
         await win.setSize(new PhysicalSize(Math.round(size * sf), Math.round(size * sf)));
         curSize = size;
@@ -400,15 +418,19 @@
     }
 
     /* ---------- 状态切换 ---------- */
-    function setMode(mode) {
+    async function setMode(mode) {
       app.classList.remove("camera", "shot", "result", "settings", "busy", "hover");
       if (mode) app.classList.add(mode);
       if (mode !== "camera") stopCamera();
       if (mode === "shot") return; // 截图流程自己管理窗口尺寸（全屏）
-      resizeTo(mode === "result" ? RESULT : IDLE, idlePos);
+      // 每次切换都以【当前窗口位置】为锚点，避免使用过期缓存位置导致窗口跳位
+      let pos = null;
+      try { const p = await win.outerPosition(); pos = { x: p.x, y: p.y }; } catch (e) {}
+      suppressMoveSave = true; // 程序化移动期间不保存位置，避免把中间态写进 localStorage
+      try { await resizeTo(mode === "result" ? RESULT : IDLE, pos); } finally { suppressMoveSave = false; }
     }
-    document.querySelectorAll("#btn-close").forEach(b => b.onclick = () => {
-      if (app.classList.contains("shot")) exitShot();
+    document.querySelectorAll("#btn-close").forEach(b => b.onclick = async () => {
+      if (app.classList.contains("shot")) await exitShot();
       else setMode(null);
     });
 
@@ -448,7 +470,10 @@
           const { x, y } = JSON.parse(saved);
           // 窗口至少要有 60px 在屏幕内，否则重置到屏幕右下角
           if (x > -60 && y > -60 && x < sw - 60 && y < sh - 60) {
-            await win.setPosition(new PhysicalPosition(Math.round(x), Math.round(y)));
+            // 钳制到屏幕内，防止分辨率变化后窗口部分/全部在屏幕外
+            const px = Math.max(0, Math.min(Math.round(x), sw - IDLE));
+            const py = Math.max(0, Math.min(Math.round(y), sh - IDLE));
+            await win.setPosition(new PhysicalPosition(px, py));
           } else {
             await win.setPosition(new PhysicalPosition(sw - 220, sh - 220));
           }
@@ -583,10 +608,12 @@
     const selBorder = $("shot-sel-border");
 
     async function captureAndShow() {
+      if (app.classList.contains("shot")) return; // 防止重复进入
       try {
-        // 记住当前位置，结束后恢复
+        // 0. 记住当前窗口位置/尺寸，退出截图时恢复（必须在放大到全屏之前）
         const p = await win.outerPosition();
-        idlePos = { x: p.x, y: p.y };
+        const s = await win.outerSize();
+        shotOrig = { x: p.x, y: p.y, w: s.width, h: s.height };
         // 1. 隐藏窗口
         await win.hide();
         await new Promise(r => setTimeout(r, 150));
@@ -612,17 +639,28 @@
           selBorder.style.display = "none";
         }, 100);
       } catch (e) {
-        suppressMoveSave = false;
-        exitShot();
+        await exitShot();
+        if (!(await win.isVisible())) await win.show();
         flashDot("截图失败");
       }
     }
-    function exitShot() {
-      suppressMoveSave = false;
+    async function exitShot() {
       shotSel = null; shotStart = null;
       shotConfirm.style.display = "none";
       shotCancel.style.display = "none";
-      setMode(null); // 恢复窗口大小和位置
+      // 先把窗口恢复到截图前的位置/尺寸（此时窗口可能隐藏且仍是全屏大小，
+      // 若不先恢复，setMode 的居中计算会基于全屏尺寸产生巨大偏移，把窗口推出屏幕）
+      if (shotOrig) {
+        suppressMoveSave = true;
+        try {
+          await win.setSize(new PhysicalSize(shotOrig.w, shotOrig.h));
+          await win.setPosition(new PhysicalPosition(shotOrig.x, shotOrig.y));
+          curSize = Math.round(shotOrig.w / (await win.scaleFactor()));
+        } catch (e) {}
+        suppressMoveSave = false;
+        shotOrig = null;
+      }
+      await setMode(null); // 恢复窗口大小和位置（必须等完成，后续 show/解码依赖正确位置）
     }
     // Esc：退出框选模式
     window.addEventListener("keydown", (e) => {
@@ -726,14 +764,14 @@
         crop.height = Math.max(1, Math.round(sh));
         crop.getContext("2d").drawImage(img, sx, sy, sw, sh, 0, 0, crop.width, crop.height);
         const cropBlob = await new Promise(r => crop.toBlob(r, "image/png"));
-        // 恢复窗口（确认时隐藏过，必须重新显示）
-        exitShot();
+        // 恢复窗口（确认时隐藏过，必须重新显示；等位置/尺寸恢复完成再显示）
+        await exitShot();
         await win.show();
         await win.setFocus();
         // 自动解码（会立即弹出结果窗口显示转圈）
         decodeBytes(new Uint8Array(await cropBlob.arrayBuffer()));
       } catch (e) {
-        exitShot();
+        await exitShot();
         flashDot("截图失败");
       }
     };

@@ -1,4 +1,6 @@
 use image::ImageEncoder;
+use tauri::Manager;
+use tauri::PhysicalPosition;
 
 /// 解码图片字节（png/jpg/bmp/webp），返回识别到的条码文本列表
 #[tauri::command]
@@ -62,6 +64,24 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
+        // 单例：已有实例运行时，再次启动会把现有窗口移到屏幕中央并显示，提示用户
+        .plugin(
+            tauri_plugin_single_instance::init(|app, _args, _cwd| {
+                if let Some(window) = app.get_webview_window("main") {
+                    // 移到窗口所在显示器中央
+                    if let Ok(Some(monitor)) = window.current_monitor() {
+                        let size = monitor.size();
+                        if let Ok(win_size) = window.outer_size() {
+                            let x = (size.width.saturating_sub(win_size.width)) / 2;
+                            let y = (size.height.saturating_sub(win_size.height)) / 2;
+                            let _ = window.set_position(PhysicalPosition::new(x, y));
+                        }
+                    }
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }),
+        )
         .invoke_handler(tauri::generate_handler![decode_image, capture_screen, screen_size, quit_app])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

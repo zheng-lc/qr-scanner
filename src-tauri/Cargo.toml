@@ -1,6 +1,6 @@
 [package]
 name = "mini-scanner"
-version = "1.0.0"
+version = "1.0.1"
 description = "Desktop mini QR/Barcode scanner widget"
 authors = ["you"]
 edition = "2021"
@@ -14,6 +14,7 @@ tauri-plugin-clipboard-manager = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-autostart = "2"
+tauri-plugin-single-instance = "2"
 zedbar = "0.5"
 xcap = "0.9"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "webp"] }

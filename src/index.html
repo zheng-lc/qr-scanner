@@ -1,0 +1,782 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>扫码器</title>
+  <style>
+    :root {
+      --bg: rgba(30, 32, 38, 0.92);
+      --fg: #e8eaf0;
+      --dim: #9aa0ad;
+      --accent: #4f8cff;
+      --danger: #ff5f56;
+      --ok: #3ddc84;
+    }
+    * { box-sizing: border-box; user-select: none; }
+    html, body {
+      margin: 0; padding: 0; width: 100%; height: 100%;
+      background: transparent; overflow: hidden;
+      font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+      color: var(--fg); font-size: 13px;
+    }
+    #app { position: absolute; inset: 0; }
+
+    /* ---- 迷你悬浮圆点（默认态，扫描图标） ---- */
+    #dot {
+      position: absolute;
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      width: 56px; height: 56px; border-radius: 50%;
+      background: var(--bg);
+      border: 1px solid rgba(255,255,255,0.12);
+      display: flex; align-items: center; justify-content: center;
+      cursor: grab;
+      opacity: 0.85;
+      transition: opacity .18s ease, box-shadow .18s ease;
+      z-index: 10;
+    }
+    #dot svg { width: 28px; height: 28px; display: block; }
+    #dot:active { cursor: grabbing; }
+    #app.hover #dot { opacity: 1; box-shadow: 0 4px 20px rgba(0,0,0,0.5); }
+    #app.busy #dot { display: none; }
+
+    /* ---- 悬浮时四周淡入的圆形按钮（上/下/左/右） ---- */
+    .orb-btn {
+      position: absolute;
+      width: 40px; height: 40px; border-radius: 50%;
+      background: var(--bg);
+      border: 1px solid rgba(255,255,255,0.12);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 17px; cursor: pointer;
+      opacity: 0; transform: scale(0.6);
+      pointer-events: none;
+      transition: opacity .2s ease, transform .2s ease, background .15s ease;
+      z-index: 9;
+      padding: 0;
+    }
+    #app.hover .orb-btn { opacity: 1; transform: scale(1); pointer-events: auto; }
+    .orb-btn:hover { background: rgba(79,140,255,0.35); border-color: var(--accent); }
+    .orb-btn:active { transform: scale(0.92); }
+    .orb-btn svg { width: 20px; height: 20px; display: block; }
+    /* 退出按钮红色 */
+    #btn-exit { color: var(--danger); }
+    #btn-exit:hover { background: rgba(255,95,86,0.35); border-color: var(--danger); }
+    /* 窗口 200×200，圆点 56 居中(72,72)，按钮 40，间距 12 */
+    #btn-camera     { top: 16px;  left: 80px; }  /* 上 */
+    #btn-screenshot { top: 144px; left: 80px; }  /* 下 */
+    #btn-settings   { top: 80px;  left: 16px; }  /* 左 */
+    #btn-exit       { top: 80px;  left: 144px; } /* 右 */
+
+    /* ---- 相机态（小取景框） ---- */
+    #camera-view {
+      position: absolute; display: none;
+      left: 10px; top: 10px;
+      width: 180px; height: 180px;
+      background: #000; border-radius: 16px; overflow: hidden;
+      border: 1px solid rgba(255,255,255,0.12);
+      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    }
+    #app.camera #camera-view { display: block; }
+    #video { width: 100%; height: 100%; object-fit: cover; display: block; }
+    #camera-view .frame {
+      position: absolute; inset: 16%;
+      border: 2px solid rgba(255,255,255,0.75);
+      border-radius: 8px; pointer-events: none;
+    }
+    #camera-view .frame::after {
+      content: ""; position: absolute; left: 8%; right: 8%; height: 2px;
+      background: linear-gradient(90deg, transparent, var(--accent), transparent);
+      animation: scanline 1.6s ease-in-out infinite;
+    }
+    @keyframes scanline { 0%,100% { top: 8%; } 50% { top: 88%; } }
+    #cam-err {
+      position: absolute; inset: 0; display: none;
+      align-items: center; justify-content: center;
+      color: var(--danger); font-size: 12px; text-align: center; padding: 16px;
+    }
+
+    /* ---- 截图态（窗口全屏覆盖，用户自由框选，类似微信截图） ---- */
+    #shot-view {
+      position: absolute; display: none;
+      inset: 0;
+      /* 必须微不透明，否则 Windows 透明窗口在 alpha=0 区域不接收鼠标事件 */
+      background: rgba(0,0,0,0.01); overflow: hidden;
+      cursor: crosshair;
+      z-index: 100;
+    }
+    #app.shot #shot-view { display: block; }
+    /* 遮罩层：4 个 div 覆盖非选区（避免 canvas 透明合成问题） */
+    .shot-mask {
+      position: absolute;
+      background: rgba(0,0,0,0.05);
+      pointer-events: none;
+      z-index: 10;
+    }
+    /* 选区边框 */
+    #shot-sel-border {
+      position: absolute;
+      border: 2px solid #4f8cff;
+      pointer-events: none;
+      z-index: 11;
+      display: none;
+    }
+    /* 四角标记 */
+    #shot-sel-border::before,
+    #shot-sel-border::after,
+    .shot-corner::before,
+    .shot-corner::after {
+      content: "";
+      position: absolute;
+      background: #4f8cff;
+    }
+    #shot-sel-border::before { top: -3px; left: -3px; width: 18px; height: 4px; }
+    #shot-sel-border::after { top: -3px; right: -3px; width: 18px; height: 4px; }
+    .shot-corner::before { bottom: -3px; left: -3px; width: 18px; height: 4px; }
+    .shot-corner::after { bottom: -3px; right: -3px; width: 18px; height: 4px; }
+    /* 全屏边框（进入截图模式时显示，类似微信截图的桌面边框） */
+    #shot-frame {
+      position: absolute; inset: 0;
+      border: 2px solid rgba(79,140,255,0.7);
+      pointer-events: none;
+      z-index: 10;
+    }
+    #shot-tip {
+      position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
+      background: rgba(0,0,0,0.65); color: #fff; font-size: 12px;
+      padding: 5px 14px; border-radius: 12px; pointer-events: none;
+      white-space: nowrap; z-index: 11;
+    }
+    /* 松开后出现的确认/取消按钮（类似微信截图） */
+    .shot-act {
+      position: absolute;
+      width: 32px; height: 32px; border-radius: 50%;
+      display: none; align-items: center; justify-content: center;
+      font-size: 15px; line-height: 1; cursor: pointer; padding: 0;
+      border: 1px solid rgba(255,255,255,0.3);
+      box-shadow: 0 2px 10px rgba(0,0,0,0.5);
+      z-index: 20;
+    }
+    #shot-confirm { background: rgba(61,220,132,0.92); color: #063; }
+    #shot-confirm:hover { background: rgba(61,220,132,1); }
+    #shot-cancel { background: rgba(255,95,86,0.92); color: #fff; }
+    #shot-cancel:hover { background: rgba(255,95,86,1); }
+
+    /* ---- 关闭按钮（扫码态时显示） ---- */
+    #btn-close {
+      position: absolute; top: -14px; right: -14px;
+      width: 28px; height: 28px; border-radius: 50%;
+      background: var(--bg); border: 1px solid rgba(255,255,255,0.2);
+      color: var(--fg); font-size: 13px; line-height: 1;
+      display: none; align-items: center; justify-content: center;
+      cursor: pointer; z-index: 20; padding: 0;
+    }
+    #app.camera #btn-close, #app.shot #btn-close { display: flex; }
+    #btn-close:hover { background: rgba(255,95,86,0.5); }
+
+    /* ---- 结果卡片（内容展示窗口，窗口放大到 360） ---- */
+    #result-card {
+      position: absolute; display: none;
+      left: 20px; top: 20px;
+      width: calc(100% - 40px); max-height: calc(100% - 40px);
+      background: var(--bg);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 14px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+      padding: 14px;
+      flex-direction: column; gap: 10px;
+      z-index: 15;
+    }
+    #result-card .card-close {
+      position: absolute; top: -10px; right: -10px;
+      width: 24px; height: 24px; border-radius: 50%;
+      background: var(--bg); border: 1px solid rgba(255,255,255,0.2);
+      color: var(--fg); font-size: 11px; line-height: 1;
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer; padding: 0;
+    }
+    #result-card .card-close:hover { background: rgba(255,95,86,0.5); }
+    #app.result #result-card { display: flex; }
+    #result-text {
+      font-size: 13px; line-height: 1.7; word-break: break-all;
+      white-space: pre-wrap; user-select: text; cursor: text;
+      flex: 1; overflow-y: auto; min-height: 60px;
+    }
+    /* 解码中等待动画 */
+    #result-loading {
+      display: none;
+      flex-direction: column; align-items: center; justify-content: center;
+      gap: 12px; flex: 1; min-height: 60px;
+      color: var(--dim); font-size: 13px;
+    }
+    #result-loading.active { display: flex; }
+    .spinner {
+      width: 32px; height: 32px; border-radius: 50%;
+      border: 3px solid rgba(255,255,255,0.15);
+      border-top-color: var(--accent);
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .btn-row { display: flex; gap: 8px; }
+    .btn {
+      flex: 1; padding: 7px 0; border-radius: 8px; border: none;
+      background: rgba(255,255,255,0.08); color: var(--fg);
+      font-size: 12px; cursor: pointer; transition: background .15s ease;
+    }
+    .btn:hover { background: rgba(255,255,255,0.16); }
+    .btn.primary { background: var(--accent); color: #fff; }
+    .btn.primary:hover { background: #6b9eff; }
+
+    /* ---- 设置卡片 ---- */
+    #settings-card {
+      position: absolute; display: none;
+      left: 15px; top: 40px;
+      width: 170px;
+      background: var(--bg);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 12px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+      padding: 10px;
+      flex-direction: column; gap: 10px;
+      z-index: 15;
+    }
+    #app.settings #settings-card { display: flex; }
+    .setting-row {
+      display: flex; align-items: center; justify-content: space-between;
+      font-size: 12px;
+    }
+    .switch { position: relative; width: 34px; height: 19px; flex: none; }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .switch .track {
+      position: absolute; inset: 0; border-radius: 19px;
+      background: rgba(255,255,255,0.18); transition: background .15s ease; cursor: pointer;
+    }
+    .switch .track::after {
+      content: ""; position: absolute; top: 2px; left: 2px;
+      width: 15px; height: 15px; border-radius: 50%; background: #fff;
+      transition: left .15s ease;
+    }
+    .switch input:checked + .track { background: var(--accent); }
+    .switch input:checked + .track::after { left: 17px; }
+    #settings-card .hint { color: var(--dim); font-size: 10px; text-align: center; }
+    #settings-card .card-close {
+      position: absolute; top: -10px; right: -10px;
+      width: 24px; height: 24px; border-radius: 50%;
+      background: var(--bg); border: 1px solid rgba(255,255,255,0.2);
+      color: var(--fg); font-size: 11px; line-height: 1;
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer; padding: 0;
+    }
+    #settings-card .card-close:hover { background: rgba(255,95,86,0.5); }
+
+    #app.shot #shot-view { z-index: 100; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <!-- 迷你圆点（拖拽区，扫描图标） -->
+    <div id="dot">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#e8eaf0" stroke-width="2" stroke-linecap="round">
+        <path d="M4 8V5a1 1 0 0 1 1-1h3" />
+        <path d="M16 4h3a1 1 0 0 1 1 1v3" />
+        <path d="M20 16v3a1 1 0 0 1-1 1h-3" />
+        <path d="M8 20H5a1 1 0 0 1-1-1v-3" />
+        <line x1="3" y1="12" x2="21" y2="12" stroke="#4f8cff" stroke-width="2.4" />
+      </svg>
+    </div>
+
+    <!-- 悬浮时四周淡入的圆形按钮：上=相机 下=截图 左=设置 右=退出 -->
+    <button class="orb-btn" id="btn-camera" title="相机扫码">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#e8eaf0" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4 8V6a2 2 0 0 1 2-2h1.5l1-1.5h5l1 1.5H18a2 2 0 0 1 2 2v2" />
+        <rect x="3" y="8" width="18" height="12" rx="2" />
+        <circle cx="12" cy="14" r="3.2" />
+      </svg>
+    </button>
+    <button class="orb-btn" id="btn-screenshot" title="截图扫码">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#e8eaf0" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4 8V5a1 1 0 0 1 1-1h3" />
+        <path d="M16 4h3a1 1 0 0 1 1 1v3" />
+        <path d="M20 16v3a1 1 0 0 1-1 1h-3" />
+        <path d="M8 20H5a1 1 0 0 1-1-1v-3" />
+        <rect x="8" y="9" width="8" height="6" rx="1" />
+      </svg>
+    </button>
+    <button class="orb-btn" id="btn-settings" title="设置">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#e8eaf0" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="3" />
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+      </svg>
+    </button>
+    <button class="orb-btn" id="btn-exit" title="退出">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
+        <line x1="6" y1="6" x2="18" y2="18" />
+        <line x1="18" y1="6" x2="6" y2="18" />
+      </svg>
+    </button>
+
+    <!-- 相机态 -->
+    <div id="camera-view">
+      <video id="video" autoplay playsinline muted></video>
+      <div class="frame"></div>
+      <div id="cam-err"></div>
+      <button id="btn-close" title="关闭">✕</button>
+    </div>
+
+    <!-- 截图态 -->
+    <div id="shot-view">
+      <div id="shot-frame"></div>
+      <div class="shot-mask" id="mask-top"></div>
+      <div class="shot-mask" id="mask-left"></div>
+      <div class="shot-mask" id="mask-right"></div>
+      <div class="shot-mask" id="mask-bottom"></div>
+      <div id="shot-sel-border"><div class="shot-corner"></div></div>
+      <div id="shot-tip">拖拽框选区域 · Esc 退出</div>
+      <button class="shot-act" id="shot-confirm" title="确认截图">✓</button>
+      <button class="shot-act" id="shot-cancel" title="取消本次框选">✕</button>
+    </div>
+
+    <!-- 结果卡片 -->
+    <div id="result-card">
+      <button class="card-close" id="btn-result-close" title="关闭">✕</button>
+      <div id="result-loading">
+        <div class="spinner"></div>
+        <div>正在解码…</div>
+      </div>
+      <div id="result-text"></div>
+      <div class="btn-row">
+        <button class="btn primary" id="btn-copy">📋 复制</button>
+        <button class="btn" id="btn-open" style="display:none">🔗 打开</button>
+      </div>
+    </div>
+
+    <!-- 设置卡片 -->
+    <div id="settings-card">
+      <button class="card-close" id="btn-settings-close" title="关闭">✕</button>
+      <div class="setting-row">
+        <span>开机自启</span>
+        <label class="switch"><input type="checkbox" id="opt-autostart"><span class="track"></span></label>
+      </div>
+      <div class="setting-row">
+        <span>窗口置顶</span>
+        <label class="switch"><input type="checkbox" id="opt-always-on-top" checked><span class="track"></span></label>
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    import { invoke } from "@tauri-apps/api/core";
+    import { getCurrentWindow } from "@tauri-apps/api/window";
+    import { PhysicalPosition, PhysicalSize } from "@tauri-apps/api/dpi";
+    import { writeText } from "@tauri-apps/plugin-clipboard-manager";
+    import { openUrl } from "@tauri-apps/plugin-opener";
+    import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
+    import jsQR from "jsqr";
+
+    const $ = (id) => document.getElementById(id);
+    const app = $("app");
+    const win = getCurrentWindow();
+
+    /* ---------- 窗口尺寸管理 ---------- */
+    const IDLE = 200, RESULT = 360;
+    let curSize = IDLE;
+    let idlePos = null;          // 记住空闲态位置
+    let suppressMoveSave = false; // 程序化移动时不保存位置
+
+    async function resizeTo(size, pos) {
+      try {
+        const sf = await win.scaleFactor();
+        if (pos) {
+          await win.setPosition(new PhysicalPosition(Math.round(pos.x * sf), Math.round(pos.y * sf)));
+        } else {
+          const p = await win.outerPosition();
+          const dx = Math.round((curSize - size) / 2 / sf);
+          const dy = Math.round((curSize - size) / 2 / sf);
+          await win.setPosition(new PhysicalPosition(p.x + Math.round(dx * sf), p.y + Math.round(dy * sf)));
+        }
+        await win.setSize(new PhysicalSize(Math.round(size * sf), Math.round(size * sf)));
+        curSize = size;
+      } catch (e) {}
+    }
+
+    /* ---------- 状态切换 ---------- */
+    function setMode(mode) {
+      app.classList.remove("camera", "shot", "result", "settings", "busy", "hover");
+      if (mode) app.classList.add(mode);
+      if (mode !== "camera") stopCamera();
+      if (mode === "shot") return; // 截图流程自己管理窗口尺寸（全屏）
+      resizeTo(mode === "result" ? RESULT : IDLE, idlePos);
+    }
+    document.querySelectorAll("#btn-close").forEach(b => b.onclick = () => {
+      if (app.classList.contains("shot")) exitShot();
+      else setMode(null);
+    });
+
+    /* ---------- 悬浮检测：仅进入中央圆点区域才触发 ---------- */
+    const dot = $("dot");
+    let hoverTimer = null;
+    function enterHover() {
+      clearTimeout(hoverTimer);
+      if (!["camera", "shot", "result", "settings"].some(c => app.classList.contains(c))) {
+        app.classList.add("hover");
+      }
+    }
+    function leaveHover() {
+      clearTimeout(hoverTimer);
+      hoverTimer = setTimeout(() => app.classList.remove("hover"), 250);
+    }
+    dot.addEventListener("mouseenter", enterHover);
+    dot.addEventListener("mouseleave", leaveHover);
+    document.querySelectorAll(".orb-btn").forEach(b => {
+      b.addEventListener("mouseenter", enterHover);
+      b.addEventListener("mouseleave", leaveHover);
+    });
+
+    /* ---------- 圆点拖拽移动窗口（不用 data-tauri-drag-region，避免吞掉点击） ---------- */
+    dot.addEventListener("mousedown", (e) => {
+      if (e.button !== 0) return;
+      win.startDragging().catch(() => {});
+    });
+
+    /* ---------- 位置记忆（带屏幕边界保护，防止窗口跑到屏幕外看不见） ---------- */
+    const POS_KEY = "mini-scanner.pos";
+    (async () => {
+      try {
+        const saved = localStorage.getItem(POS_KEY);
+        const [sw, sh] = await invoke("screen_size");
+        if (saved) {
+          const { x, y } = JSON.parse(saved);
+          // 窗口至少要有 60px 在屏幕内，否则重置到屏幕右下角
+          if (x > -60 && y > -60 && x < sw - 60 && y < sh - 60) {
+            await win.setPosition(new PhysicalPosition(Math.round(x), Math.round(y)));
+          } else {
+            await win.setPosition(new PhysicalPosition(sw - 220, sh - 220));
+          }
+        } else {
+          // 首次启动：屏幕右下角
+          await win.setPosition(new PhysicalPosition(sw - 220, sh - 220));
+        }
+        // 确保窗口可见
+        if (!(await win.isVisible())) await win.show();
+      } catch (e) {}
+    })();
+    win.onMoved(({ payload }) => {
+      if (suppressMoveSave) return;
+      try { localStorage.setItem(POS_KEY, JSON.stringify({ x: payload.x, y: payload.y })); } catch (e) {}
+    });
+
+    /* ---------- 解码（Rust 端） ---------- */
+    async function decodeBytes(bytes) {
+      // 立即弹出结果窗口显示转圈等待动画
+      showDecoding();
+      try {
+        const results = await invoke("decode_image", { bytes: Array.from(bytes) });
+        if (results && results.length) {
+          showResult(results.join("\n"));
+        } else {
+          showDecodeFail("未识别到条码/二维码");
+        }
+      } catch (e) {
+        showDecodeFail(String(e));
+      }
+    }
+    // 显示解码中等待状态
+    function showDecoding() {
+      $("result-loading").classList.add("active");
+      $("result-text").style.display = "none";
+      $("result-text").textContent = "";
+      $("btn-copy").style.display = "none";
+      $("btn-open").style.display = "none";
+      setMode("result");
+    }
+    // 解码失败
+    function showDecodeFail(msg) {
+      $("result-loading").classList.remove("active");
+      const t = $("result-text");
+      t.style.display = "";
+      t.textContent = "❌ " + msg;
+      t.style.color = "var(--danger)";
+      $("btn-copy").style.display = "none";
+      $("btn-open").style.display = "none";
+      setMode("result");
+    }
+    let flashTimer = null;
+    function flashDot(msg) {
+      dot.style.borderColor = "var(--danger)";
+      dot.style.boxShadow = "0 0 0 4px rgba(255,95,86,0.4)";
+      clearTimeout(flashTimer);
+      flashTimer = setTimeout(() => { dot.style.borderColor = ""; dot.style.boxShadow = ""; }, 1500);
+    }
+
+    /* ---------- 结果卡片（不自动缩回，手动关闭或 Esc） ---------- */
+    let currentResult = "";
+    function showResult(text) {
+      currentResult = text;
+      $("result-loading").classList.remove("active");
+      const t = $("result-text");
+      t.style.display = "";
+      t.style.color = "";
+      t.textContent = text;
+      $("btn-copy").style.display = "";
+      $("btn-open").style.display = /^https?:\/\/\S+$/i.test(text.trim()) ? "" : "none";
+      setMode("result");
+    }
+    $("btn-result-close").onclick = () => setMode(null);
+    $("btn-copy").onclick = async () => {
+      try { await writeText(currentResult); } catch (e) {}
+      setMode(null);
+    };
+    $("btn-open").onclick = async () => {
+      try { await openUrl(currentResult.trim()); } catch (e) {}
+      setMode(null);
+    };
+
+    /* ---------- 相机扫码（jsQR） ---------- */
+    let stream = null, camRaf = 0;
+    const video = $("video");
+    const camCanvas = document.createElement("canvas");
+    const camCtx = camCanvas.getContext("2d", { willReadFrequently: true });
+
+    async function startCamera() {
+      setMode("camera");
+      $("cam-err").style.display = "none";
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "environment" },
+          audio: false,
+        });
+        video.srcObject = stream;
+        await video.play();
+        camLoop();
+      } catch (e) {
+        const err = $("cam-err");
+        err.textContent = "无法打开摄像头：\n" + (e.message || e);
+        err.style.display = "flex";
+      }
+    }
+    function camLoop() {
+      if (!stream) return;
+      camRaf = requestAnimationFrame(camLoop);
+      if (video.readyState < 2) return;
+      const w = 640, h = Math.round(640 * video.videoHeight / Math.max(1, video.videoWidth));
+      camCanvas.width = w; camCanvas.height = h;
+      camCtx.drawImage(video, 0, 0, w, h);
+      const img = camCtx.getImageData(0, 0, w, h);
+      const code = jsQR(img.data, w, h, { inversionAttempts: "attemptBoth" });
+      if (code && code.data) {
+        stopCamera();
+        showResult(code.data);
+      }
+    }
+    function stopCamera() {
+      cancelAnimationFrame(camRaf);
+      if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+      video.srcObject = null;
+    }
+    $("btn-camera").onclick = startCamera;
+
+    /* ---------- 截图扫码（透明全屏覆盖，用户自由框选，确认/取消） ---------- */
+    let shotSel = null, shotStart = null, shotScale = 1;
+    const shotConfirm = $("shot-confirm");
+    const shotCancel = $("shot-cancel");
+    const maskTop = $("mask-top"), maskLeft = $("mask-left"), maskRight = $("mask-right"), maskBottom = $("mask-bottom");
+    const selBorder = $("shot-sel-border");
+
+    async function captureAndShow() {
+      try {
+        // 记住当前位置，结束后恢复
+        const p = await win.outerPosition();
+        idlePos = { x: p.x, y: p.y };
+        // 1. 隐藏窗口
+        await win.hide();
+        await new Promise(r => setTimeout(r, 150));
+        // 2. 获取屏幕尺寸，窗口放大到全屏透明覆盖
+        const [sw, sh] = await invoke("screen_size");
+        suppressMoveSave = true;
+        const sf = await win.scaleFactor();
+        shotScale = 1 / sf; // 逻辑像素 → 物理像素
+        await win.setSize(new PhysicalSize(sw, sh));
+        await win.setPosition(new PhysicalPosition(0, 0));
+        curSize = sw;
+        // 3. 显示透明窗口，进入框选模式
+        await win.show();
+        await win.setFocus();
+        setMode("shot");
+        // 初始化遮罩 div 尺寸
+        setTimeout(() => {
+          const vw = window.innerWidth, vh = window.innerHeight;
+          maskTop.style.cssText = `left:0;top:0;width:${vw}px;height:${vh}px`;
+          maskLeft.style.cssText = `left:0;top:0;width:0;height:0`;
+          maskRight.style.cssText = `left:${vw}px;top:0;width:0;height:0`;
+          maskBottom.style.cssText = `left:0;top:${vh}px;width:0;height:0`;
+          selBorder.style.display = "none";
+        }, 100);
+      } catch (e) {
+        suppressMoveSave = false;
+        exitShot();
+        flashDot("截图失败");
+      }
+    }
+    function exitShot() {
+      suppressMoveSave = false;
+      shotSel = null; shotStart = null;
+      shotConfirm.style.display = "none";
+      shotCancel.style.display = "none";
+      setMode(null); // 恢复窗口大小和位置
+    }
+    // Esc：退出框选模式
+    window.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        if (app.classList.contains("shot")) exitShot();
+        else if (app.classList.contains("result")) setMode(null);
+      }
+    });
+    function drawShotOverlay() {
+      const vw = window.innerWidth, vh = window.innerHeight;
+      if (!shotSel) {
+        // 无选区：全屏遮罩
+        maskTop.style.cssText = `left:0;top:0;width:${vw}px;height:${vh}px`;
+        maskLeft.style.cssText = `left:0;top:0;width:0;height:0`;
+        maskRight.style.cssText = `left:${vw}px;top:0;width:0;height:0`;
+        maskBottom.style.cssText = `left:0;top:${vh}px;width:0;height:0`;
+        selBorder.style.display = "none";
+        return;
+      }
+      const { x, y, w, h } = shotSel;
+      // 上方遮罩
+      maskTop.style.cssText = `left:0;top:0;width:${vw}px;height:${y}px`;
+      // 下方遮罩
+      maskBottom.style.cssText = `left:0;top:${y + h}px;width:${vw}px;height:${vh - y - h}px`;
+      // 左侧遮罩（选区高度内）
+      maskLeft.style.cssText = `left:0;top:${y}px;width:${x}px;height:${h}px`;
+      // 右侧遮罩（选区高度内）
+      maskRight.style.cssText = `left:${x + w}px;top:${y}px;width:${vw - x - w}px;height:${h}px`;
+      // 选区边框
+      selBorder.style.display = "block";
+      selBorder.style.left = x + "px";
+      selBorder.style.top = y + "px";
+      selBorder.style.width = w + "px";
+      selBorder.style.height = h + "px";
+    }
+    function showShotButtons() {
+      if (!shotSel || shotSel.w < 10 || shotSel.h < 10) return;
+      const vw = window.innerWidth, vh = window.innerHeight;
+      let bx = shotSel.x + shotSel.w + 10;
+      let by = shotSel.y + shotSel.h + 10;
+      if (by + 32 > vh) by = shotSel.y - 42;
+      if (bx + 74 > vw) bx = shotSel.x - 74;
+      shotConfirm.style.display = "flex";
+      shotCancel.style.display = "flex";
+      shotConfirm.style.left = bx + "px";
+      shotConfirm.style.top = by + "px";
+      shotCancel.style.left = (bx + 38) + "px";
+      shotCancel.style.top = by + "px";
+    }
+    function hideShotButtons() {
+      shotConfirm.style.display = "none";
+      shotCancel.style.display = "none";
+    }
+    function shotPos(e) {
+      return { x: e.clientX, y: e.clientY };
+    }
+    // 框选交互（类似微信截图：拖拽中只显示框，松开后才出现按钮）
+    $("shot-view").addEventListener("mousedown", (e) => {
+      if (e.target === shotConfirm || e.target === shotCancel) return;
+      shotStart = shotPos(e);
+      shotSel = null;
+      hideShotButtons();
+    });
+    $("shot-view").addEventListener("mousemove", (e) => {
+      if (!shotStart) return;
+      const p = shotPos(e);
+      shotSel = {
+        x: Math.min(shotStart.x, p.x), y: Math.min(shotStart.y, p.y),
+        w: Math.abs(p.x - shotStart.x), h: Math.abs(p.y - shotStart.y),
+      };
+      drawShotOverlay();
+    });
+    $("shot-view").addEventListener("mouseup", () => {
+      if (!shotStart) return;
+      shotStart = null;
+      if (shotSel && shotSel.w < 8 && shotSel.h < 8) {
+        shotSel = null;
+        drawShotOverlay();
+        return;
+      }
+      // 松开后显示确认/取消按钮（类似微信截图）
+      showShotButtons();
+    });
+    // 确认截图
+    shotConfirm.onclick = async () => {
+      if (!shotSel) return;
+      shotConfirm.style.display = "none";
+      shotCancel.style.display = "none";
+      // 隐藏窗口避免截到自己
+      await win.hide();
+      await new Promise(r => setTimeout(r, 100));
+      try {
+        const [png, w, h] = await invoke("capture_screen");
+        const blob = new Blob([new Uint8Array(png)], { type: "image/png" });
+        const img = await createImageBitmap(blob);
+        // 裁剪选区（逻辑像素 → 物理像素）
+        const sx = shotSel.x * (1 / shotScale), sy = shotSel.y * (1 / shotScale);
+        const sw = shotSel.w * (1 / shotScale), sh = shotSel.h * (1 / shotScale);
+        const crop = document.createElement("canvas");
+        crop.width = Math.max(1, Math.round(sw));
+        crop.height = Math.max(1, Math.round(sh));
+        crop.getContext("2d").drawImage(img, sx, sy, sw, sh, 0, 0, crop.width, crop.height);
+        const cropBlob = await new Promise(r => crop.toBlob(r, "image/png"));
+        // 恢复窗口（确认时隐藏过，必须重新显示）
+        exitShot();
+        await win.show();
+        await win.setFocus();
+        // 自动解码（会立即弹出结果窗口显示转圈）
+        decodeBytes(new Uint8Array(await cropBlob.arrayBuffer()));
+      } catch (e) {
+        exitShot();
+        flashDot("截图失败");
+      }
+    };
+    // 取消本次框选，重新自由框选
+    shotCancel.onclick = () => {
+      shotSel = null;
+      shotStart = null;
+      shotConfirm.style.display = "none";
+      shotCancel.style.display = "none";
+      drawShotOverlay();
+    };
+    $("btn-screenshot").onclick = captureAndShow;
+
+    /* ---------- 设置 ---------- */
+    $("btn-settings").onclick = async () => {
+      try { $("opt-autostart").checked = await isEnabled(); } catch { $("opt-autostart").checked = false; }
+      try { $("opt-always-on-top").checked = await win.isAlwaysOnTop(); } catch { $("opt-always-on-top").checked = true; }
+      setMode("settings");
+    };
+    $("btn-settings-close").onclick = () => setMode(null);
+    // 点击设置卡片外部也关闭
+    document.addEventListener("mousedown", (e) => {
+      if (app.classList.contains("settings") && !$("settings-card").contains(e.target) && e.target.id !== "btn-settings") {
+        setMode(null);
+      }
+    });
+    $("opt-autostart").onchange = async (e) => {
+      try {
+        if (e.target.checked) await enable(); else await disable();
+      } catch (err) { e.target.checked = !e.target.checked; }
+    };
+    $("opt-always-on-top").onchange = async (e) => {
+      try { await win.setAlwaysOnTop(e.target.checked); } catch (err) {}
+    };
+
+    /* ---------- 退出（Rust 端退出整个应用进程） ---------- */
+    $("btn-exit").onclick = async () => {
+      try { await invoke("quit_app"); }
+      catch (e) {
+        try { await win.close(); } catch (e2) {}
+      }
+    };
+
+  </script>
+</body>
+</html>

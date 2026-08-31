@@ -1,0 +1,28 @@
+[package]
+name = "mini-scanner"
+version = "1.0.0"
+description = "Desktop mini QR/Barcode scanner widget"
+authors = ["you"]
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-autostart = "2"
+zedbar = "0.5"
+xcap = "0.9"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "webp"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+strip = true
+lto = true
+opt-level = "s"
+codegen-units = 1
+panic = "abort"
